@@ -62,7 +62,7 @@ The script will auto-download MNIST, train for 100 epochs, save samples to `gan_
 | Parameter | Default | 
 |-----------|---------|
 | `batch_size` | 128 |
-| `noise_dim` | 100 |
+| `noice_dim` | 100 |
 | `lr` | 2e-4 |
 | `EPOCHS` | 100 |
 | `smoothing` | 0.9 |
