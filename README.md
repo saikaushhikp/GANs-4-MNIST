@@ -41,8 +41,7 @@ The script will auto-download MNIST, train for 100 epochs, save samples to `gan_
 .
 ├── run.py                      # Training orchestration
 ├── utilizations.py             # Models, loss functions, visualization
-├── gan_outputs/                # Generated samples & model weights
-└── .github/copilot-instructions.md
+└── gan_outputs/                # Generated samples & model weights
 ```
 
 ## Architecture
