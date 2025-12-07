@@ -8,32 +8,14 @@ import matplotlib.pyplot as plt
 from tqdm.notebook import tqdm
 from torchvision import datasets, transforms as T
 from torch.utils.data import DataLoader
-from torchvision.utils import make_grid
+from torchvision.utils import make_grid, save_image
 from torch import nn
 from torchsummary import summary
+import os
 
 
-from utilizations import show_tensor_images, weights_init, real_loss, fake_loss, Discriminator, Generator
+from utilizations import show_tensor_images, weights_init, discriminator_loss, generator_loss, Discriminator, Generator
 
-
-# %%
-#############################
-# load MNIST
-############################
-train_augs = T.Compose(
-    [
-        T.RandomRotation((-20, 20)),
-        T.ToTensor(),  # (h,w,c) -> (c,h,w), range [0, 1]
-        T.Normalize((0.5,), (0.5,))  # Normalize to [-1, 1]
-    ]
-)
-trainset = datasets.MNIST('MNIST/', download=True, train=True, transform=train_augs)
-print("The length of trainset is:", len(trainset))
-
-image, label = trainset[100]
-print(image.shape, label)
-plt.imshow(image.squeeze(), cmap='gray')
-plt.show()
 
 # %%
 ################
@@ -42,24 +24,43 @@ plt.show()
 
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
-batch_size = 512
-noice_dim = 64  # noise vector dimension to pass into generator
+print("Device:", device)
 
-# optimizer params
+# hyperparams tuned for stability
+batch_size = 128
+noice_dim = 100
 lr = 2e-4
-beta_1 = 0.85
-beta_2 = 0.999  
+beta1 = 0.5   # DCGAN recommendation
+beta2 = 0.999
+EPOCHS = 100 
 
-# training variables
-EPOCHS = 100
+
+# %%
+#############################
+# load MNIST
+############################
+# data augmentation / normalization
+train_augs = T.Compose([
+    T.RandomRotation((-10, 10)),
+    T.ToTensor(),
+    T.Normalize((0.5,), (0.5,))  # map to [-1,1]
+])
+
+
+trainset = datasets.MNIST('MNIST/', download=True, train=True, transform=train_augs)
+trainloader = DataLoader(trainset, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=True)
+
+print("The length of trainset is:", len(trainset))
+
+image, label = trainset[100]
+print(image.shape, label)
+plt.imshow(image.squeeze(), cmap='gray')
+plt.show()
 
 # %%
 ########
 # Setup
 ########
-
-trainloader = DataLoader(trainset, batch_size=batch_size, shuffle=True)
-print("Length of Trainloader =", len(trainloader))
 
 # loading 1st batch and it's shape
 dataiter = iter(trainloader)
@@ -69,92 +70,114 @@ print("shapes of images and labels:", images.shape, labels.shape)
 show_tensor_images(images)
 
 
-D = Discriminator()
-D.to(device)
-D = D.apply(weights_init)
-summary(D, input_size=(1, 28, 28))
-D_opt = torch.optim.Adam(D.parameters(), lr=lr, betas=(beta_1, beta_2))
+D = Discriminator().to(device)
+G = Generator(noice_dim).to(device)
 
-G = Generator(noice_dim)
-G.to(device)
-G = G.apply(weights_init)
+D.apply(weights_init)
+G.apply(weights_init)
+
+D_opt = torch.optim.Adam(D.parameters(), lr=lr, betas=(beta1, beta2))
+G_opt = torch.optim.Adam(G.parameters(), lr=lr, betas=(beta1, beta2))
+
+# Optional: LR schedulers can help, but not required initially
+
+# Diagnostics
+print("Trainloader length:", len(trainloader))
+summary(D, input_size=(1,28,28))
 summary(G, input_size=(1, noice_dim))
-G_opt = torch.optim.Adam(G.parameters(), lr=lr, betas=(beta_1, beta_2))
 
 
 # %%
 ###########
 # Training
 ##########
-for epoch in range(EPOCHS):
-    total_d_loss = 0.0
-    total_g_loss = 0.0
-    pbar = tqdm(trainloader, desc=f"Train {epoch+1}/{EPOCHS}")
 
-    for real_img, _ in pbar:
-        real_img = real_img.to(device)
-        current_batch_size = real_img.size(0)  # Handle last batch
+fixed_noise = torch.randn(64, noice_dim, device=device)  # fixed for progress visualization
+d_losses = []
+g_losses = []
 
-        ######################
+os.makedirs("gan_outputs", exist_ok=True)
+
+
+for epoch in range(1, EPOCHS+1):
+    D.train()
+    G.train()
+    running_d = 0.0
+    running_g = 0.0
+    pbar = tqdm(trainloader, desc=f"Epoch {epoch}/{EPOCHS}", leave=False)
+
+    for real_imgs, _ in pbar:
+        real_imgs = real_imgs.to(device)
+        b_size = real_imgs.size(0)
+
+        # ----------------------
         # Train Discriminator
-        ######################
+        # ----------------------
         D_opt.zero_grad()
+        # Real logits
+        logits_real = D(real_imgs)
+        # Fake images (detach so gradients not propagated into G)
+        noise = torch.randn(b_size, noice_dim, device=device)
+        fake_imgs = G(noise).detach()
+        logits_fake = D(fake_imgs)
 
-        # Train on real images
-        D_pred_real = D(real_img)
-        D_real_loss = real_loss(D_pred_real)
-
-        # Train on fake images
-        noice = torch.randn(current_batch_size, noice_dim, device=device)
-        fake_img = G(noice)
-        # FIXED: Detach fake images to prevent gradients flowing to Generator
-        D_pred_fake = D(fake_img.detach())
-        D_fake_loss = fake_loss(D_pred_fake)
-
-        # Combine losses and update
-        D_loss = (D_fake_loss + D_real_loss) / 2
-        D_loss.backward()
+        d_loss = discriminator_loss(logits_real, logits_fake, smoothing=0.9, noisy_labels=0.05)
+        d_loss.backward()
         D_opt.step()
 
-        total_d_loss += D_loss.item()
-
-        ##################
+        # ----------------------
         # Train Generator
-        ##################
+        # ----------------------
         G_opt.zero_grad()
-
-        # FIXED: Generate fresh noise for generator training
-        noice = torch.randn(current_batch_size, noice_dim, device=device)
-        fake_img = G(noice)
-        D_pred = D(fake_img)
-        G_loss = real_loss(D_pred)  # Generator wants discriminator to think fakes are real
-
-        G_loss.backward()
+        noise = torch.randn(b_size, noice_dim, device=device)  # fresh noise
+        fake_imgs = G(noise)
+        logits_fake_for_g = D(fake_imgs)   # don't detach
+        g_loss = generator_loss(logits_fake_for_g)
+        g_loss.backward()
         G_opt.step()
 
-        total_g_loss += G_loss.item()
+        running_d += d_loss.item()
+        running_g += g_loss.item()
 
-        # Update progress bar
-        pbar.set_postfix({
-            'D loss': f'{D_loss.item():.4f}',
-            'G loss': f'{G_loss.item():.4f}'
-        })
+        pbar.set_postfix({'D_loss': f'{d_loss.item():.4f}', 'G_loss': f'{g_loss.item():.4f}'})
 
-    avg_d_loss = total_d_loss / len(trainloader)
-    avg_g_loss = total_g_loss / len(trainloader)
+    avg_d = running_d / len(trainloader)
+    avg_g = running_g / len(trainloader)
+    d_losses.append(avg_d)
+    g_losses.append(avg_g)
 
-    print(f"Epoch: {epoch+1} | D loss: {avg_d_loss:.5f} | G loss: {avg_g_loss:.5f}")
+    print(f"Epoch {epoch:02d} | D_loss: {avg_d:.4f} | G_loss: {avg_g:.4f}")
 
-    # Show generated images every epoch
-    if (epoch + 1) % 5 == 0 or epoch == 0:
-        show_tensor_images(fake_img)
+    # Save samples from fixed noise to monitor progress
+    G.eval()
+    with torch.no_grad():
+        samples = G(fixed_noise)
+        save_image((samples * 0.5 + 0.5), f"gan_outputs/fixed_noise_epoch_{epoch:03d}.png", nrow=8)
+    G.train()
 
 
 # %%
-# Now you can use Generator Network to generate handwritten images
-print("\nGenerating final images...")
-noise = torch.randn(batch_size, noice_dim, device=device)
-generated_image = G(noise)
-show_tensor_images(generated_image)
+
+plt.figure(figsize=(8,4))
+plt.plot(d_losses, label='D loss')
+plt.plot(g_losses, label='G loss')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.legend()
+plt.title('Training losses')
+plt.grid(True)
+plt.show()
+
+# Show last sample grid
+with torch.no_grad():
+    final_noise = torch.randn(64, noice_dim, device=device)
+    final_samples = G(final_noise)
+    show_tensor_images(final_samples)
+
+# Save models
+torch.save(G.state_dict(), "gan_outputs/generator_final.pth")
+torch.save(D.state_dict(), "gan_outputs/discriminator_final.pth")
+
+print("Training finished. Models and sample images saved to ./gan_outputs")
 
 
