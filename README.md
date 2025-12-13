@@ -9,6 +9,8 @@ An implementation of Deep Convolutional Generative Adversarial Networks (DCGAN) 
 - **Progress Visualization**: Fixed noise sampling every epoch to monitor training quality
 - **Auto-calibrated Discriminator**: Discriminator automatically computes flattened feature dimensions via dummy forward pass
 - **Pre-trained Models**: Saved model weights in `gan_outputs/`
+- sample generated images:  
+![Generated Image](gan_outputs/fixed_noise_epoch_020.png)
 
 ## Quick Start
 
